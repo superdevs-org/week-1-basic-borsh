@@ -1,110 +1,73 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, Data, Fields};
+use syn::{parse_macro_input,DeriveInput, Data, Fields};
 
 #[proc_macro_derive(SerializeNumberStruct)]
-pub fn serialise_number_struct(input: TokenStream) -> TokenStream {
-    let ast: DeriveInput = syn::parse(input).unwrap();
-    let name = &ast.ident;
-
-    let serialize_fields = match &ast.data {
-        Data::Struct(data_struct) => {
-            match &data_struct.fields {
-                Fields::Named(fields) => {
-                    let field_serializations = fields.named.iter().map(|field| {
-                        let field_name = &field.ident;
-                        quote! {
-                            result.extend_from_slice(&self.#field_name.to_be_bytes());
-                        }
-                    });
-                    /*
-                        field_serializeations = [quote!(result.extend_from_slice(&self.qty_1.to_be_bytes())), quote!(result.extend_from_slice(&self.qty_2.to_be_bytes()))]
-                     */
-                    quote! {
-                        #(#field_serializations)*
-                    }
-                }
-                _ => panic!("Only named fields are supported"),
-            }
-        }
-        _ => panic!("Only structs are supported"),
-    };
-    /*
-        serialize_fields ->
-        result.extend_from_slice(&self.qty_1.to_be_bytes())
-        result.extend_from_slice(&self.qty_2.to_be_bytes())
-        result.extend_from_slice(&self.qty_3.to_be_bytes())
-     */
-
-    let generated = quote! {
-        impl Serialize for #name {
-            fn serialize(&self) -> Vec<u8> {
-                let mut result = Vec::new();
-                #serialize_fields
-                result
-            }
-        }
-    };
-    generated.into()
+pub fn serialize_number_struct(input: TokenStream) -> TokenStream {
+  let ast = parse_macro_input!(input as DeriveInput);
+  impl_serialize(&ast).into()
 }
 
 #[proc_macro_derive(DeserializeNumberStruct)]
-pub fn deserialise_number_struct(input: TokenStream) -> TokenStream {
-    let ast: DeriveInput = syn::parse(input).unwrap();
-    let name = &ast.ident;
+pub fn deserialize_number_struct(input: TokenStream) -> TokenStream {
+  let ast = parse_macro_input!(input as DeriveInput);
+  impl_deserialize(&ast).into()
+}
 
-    let (deserialize_fields, field_assignments, total_size) = match &ast.data {
-        Data::Struct(data_struct) => {
-            match &data_struct.fields {
-                Fields::Named(fields) => {
-                    let mut offset: usize = 0;
-                    let mut field_deserializations = Vec::new();
-                    let mut field_assignments = Vec::new();
-                    
-                    for field in &fields.named {
-                        let field_name = &field.ident;
-                        let field_size = 4;
-                        let start_offset = offset;
-                        let end_offset = offset + field_size;
-                        
-                        field_deserializations.push(quote! {
-                            let #field_name = {
-                                let bytes: [u8; 4] = base[#start_offset..#end_offset]
-                                    .try_into()
-                                    .map_err(|_| Error)?;
-                                i32::from_be_bytes(bytes)
-                            };
-                        });
-                        
-                        field_assignments.push(quote! {
-                            #field_name
-                        });
-                        
-                        offset += field_size;
-                    }
-                    
-                    (field_deserializations, field_assignments, offset)
-                }
-                _ => panic!("Only named fields are supported"),
-            }
-        }
-        _ => panic!("Only structs are supported"),
-    };
+fn impl_serialize(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
+  let name = &ast.ident;
 
-    let generated = quote! {
-        impl Deserialize for #name {
-            fn deserialize(base: &[u8]) -> Result<Self, Error> {
-                if base.len() < #total_size {
-                    return Err(Error);
-                }
-                
-                #(#deserialize_fields)*
-                
-                Ok(#name {
-                    #(#field_assignments,)*
-                })
-            }
-        }
-    };
-    generated.into()
+  let fields = match &ast.data {
+    Data::Struct(data_struct) => match &data_struct.fields {
+      Fields::Named(fields_named) => &fields_named.named,
+      _ => panic!("SerializeNumberStruct only works with named fields."),
+    },
+    _ => panic!("SerializeNumberStruct only works with structs."),
+  };
+
+  let serialize_fields = fields.iter().map(|f| {
+    let ident = &f.ident;
+    quote! {
+      serialize_macro_traits::Serialize::serialize(&self.#ident, writer)?;
+    }
+  });
+
+  quote! {
+    impl serialize_macro_traits::Serialize for #name {
+      fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        #(#serialize_fields)*
+        Ok(())
+      }
+    }
+  }
+}
+
+fn impl_deserialize(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
+  let name = &ast.ident;
+
+  let fields = match &ast.data {
+    Data::Struct(data_struct) => match &data_struct.fields {
+      Fields::Named(fields_named) => &fields_named.named,
+      _ => panic!("DeserializeNumberStruct only works with named fields."),
+    },
+    _ => panic!("DeserializeNumberStruct only works with structs."),
+  };
+
+  let deserialize_fields = fields.iter().map(|f| {
+    let ident = &f.ident;
+    let ty = &f.ty;
+    quote! {
+      #ident: <#ty as serialize_macro_traits::Deserialize>::deserialize(reader)?,
+    }
+  });
+
+  quote! {
+    impl serialize_macro_traits::Deserialize for #name {
+      fn deserialize<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        Ok(Self {
+          #(#deserialize_fields)*
+        })
+      }
+    }
+  }
 }
